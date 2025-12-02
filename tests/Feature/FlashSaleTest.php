@@ -141,4 +141,20 @@ class FlashSaleTest extends TestCase
         // 3. Stock should increase by 2 (8 + 2 = 10)
         $this->assertDatabaseHas('products', ['id' => 1, 'stock' => 10]);
     }
+
+    public function test_webhook_before_order_creation_returns_404_for_retry()
+    {
+        // 1. Simulate a webhook for an order ID that does not exist yet (e.g., ID 999)
+        // This simulates the "Out of order" scenario where webhook arrives before the DB has the order.
+        $payload = [
+            'order_id' => 999, 
+            'status' => 'success',
+            'idempotency_key' => 'early-key-789'
+        ];
+
+        // 2. We expect a 404 Not Found
+        // This tells the payment provider to TRY AGAIN later.
+        $this->postJson('/api/payments/webhook', $payload)
+             ->assertStatus(404);
+    }
 }
