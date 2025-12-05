@@ -7,6 +7,8 @@ use App\Models\Product;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Cache;
+use Illuminate\Support\Facades\Log;
 
 class HoldController extends Controller
 {
@@ -40,6 +42,13 @@ class HoldController extends Controller
 
                 // 3. Check availability
                 if ($available < $qty) {
+                    // Log contention metric
+                    Log::info('Hold creation failed: insufficient stock', [
+                        'product_id' => $productId,
+                        'requested_qty' => $qty,
+                        'available_stock' => $available,
+                        'metric' => 'stock_contention'
+                    ]);
                     throw new \Exception('Insufficient stock.', 409);
                 }
 
@@ -48,6 +57,17 @@ class HoldController extends Controller
                     'product_id' => $productId,
                     'qty' => $qty,
                     'expires_at' => now()->addMinutes(2),
+                ]);
+
+                // Invalidate product cache to reflect new availability
+                Cache::forget("product_{$productId}");
+
+                // Log successful hold creation
+                Log::info('Hold created successfully', [
+                    'hold_id' => $hold->id,
+                    'product_id' => $productId,
+                    'qty' => $qty,
+                    'metric' => 'hold_created'
                 ]);
 
                 return $hold;

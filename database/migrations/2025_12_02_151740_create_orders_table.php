@@ -17,7 +17,6 @@ return new class extends Migration
             $table->unsignedInteger('qty');
             $table->decimal('amount', 10, 2); // Total price (price * qty)
             $table->string('status')->default('pending'); // pending, paid, cancelled
-            $table->string('payment_idempotency_key')->nullable()->unique(); // To prevent double payments
             $table->timestamps();
         });
     }

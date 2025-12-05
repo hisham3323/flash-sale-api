@@ -12,7 +12,6 @@ class Order extends Model
         'qty',
         'amount',
         'status',
-        'payment_idempotency_key',
     ];
 
     protected $casts = [

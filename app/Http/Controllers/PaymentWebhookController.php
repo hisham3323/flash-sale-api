@@ -8,6 +8,7 @@ use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
 use Illuminate\Support\Facades\Log;
+use Illuminate\Support\Facades\Cache;
 
 class PaymentWebhookController extends Controller
 {
@@ -32,6 +33,12 @@ class PaymentWebhookController extends Controller
                 
                 // 2. Check if this specific webhook key was already processed
                 if (WebhookLog::where('idempotency_key', $key)->exists()) {
+                    // Log webhook deduplication metric
+                    Log::info('Webhook duplicate detected and ignored', [
+                        'order_id' => $orderId,
+                        'idempotency_key' => $key,
+                        'metric' => 'webhook_dedupe'
+                    ]);
                     return; // Already handled, do nothing, return 200
                 }
 
@@ -42,6 +49,12 @@ class PaymentWebhookController extends Controller
 
                 if (!$order) {
                     // If order doesn't exist yet, we throw 404 so provider retries later.
+                    // Log retry metric
+                    Log::info('Webhook received before order creation', [
+                        'order_id' => $orderId,
+                        'idempotency_key' => $key,
+                        'metric' => 'webhook_retry_required'
+                    ]);
                     throw new \Exception('Order not found.', 404);
                 }
 
@@ -55,7 +68,13 @@ class PaymentWebhookController extends Controller
 
                 // 5. Check Order State (Out-of-Order Protection)
                 if ($order->status !== 'pending') {
-                    Log::info("Order {$orderId} is already {$order->status}. Ignoring webhook {$key}.");
+                    Log::info('Webhook ignored: order already processed', [
+                        'order_id' => $orderId,
+                        'current_status' => $order->status,
+                        'webhook_status' => $status,
+                        'idempotency_key' => $key,
+                        'metric' => 'webhook_out_of_order'
+                    ]);
                     return;
                 }
 
@@ -63,7 +82,11 @@ class PaymentWebhookController extends Controller
                 if ($status === 'success') {
                     $order->status = 'paid';
                     $order->save();
-                    Log::info("Order {$orderId} marked as paid via webhook {$key}.");
+                    Log::info('Order payment successful', [
+                        'order_id' => $orderId,
+                        'idempotency_key' => $key,
+                        'metric' => 'payment_success'
+                    ]);
                 } else {
                     // Payment Failed: Cancel order AND return stock
                     $order->status = 'cancelled';
@@ -71,7 +94,16 @@ class PaymentWebhookController extends Controller
 
                     // Return stock
                     $order->product->increment('stock', $order->qty);
-                    Log::info("Order {$orderId} cancelled via webhook {$key}. Stock returned.");
+                    
+                    // Invalidate product cache since stock changed
+                    Cache::forget("product_{$order->product_id}");
+                    
+                    Log::info('Order payment failed, stock returned', [
+                        'order_id' => $orderId,
+                        'idempotency_key' => $key,
+                        'qty_returned' => $order->qty,
+                        'metric' => 'payment_failed'
+                    ]);
                 }
             });
 

@@ -7,6 +7,7 @@ use App\Models\Order;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Cache;
 
 class OrderController extends Controller
 {
@@ -37,6 +38,9 @@ class OrderController extends Controller
                 // 3. DEDUCT STOCK PERMANENTLY
                 // Since Hold logic changed to "reservation", the Order now claims the physical stock.
                 $hold->product->decrement('stock', $hold->qty);
+
+                // Invalidate product cache since stock changed
+                Cache::forget("product_{$hold->product_id}");
 
                 // 4. Create the Order
                 $totalAmount = $hold->product->price * $hold->qty;
