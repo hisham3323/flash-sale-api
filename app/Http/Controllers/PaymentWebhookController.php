@@ -3,9 +3,11 @@
 namespace App\Http\Controllers;
 
 use App\Models\Order;
+use App\Models\WebhookLog;
 use Illuminate\Http\JsonResponse;
 use Illuminate\Http\Request;
 use Illuminate\Support\Facades\DB;
+use Illuminate\Support\Facades\Log;
 
 class PaymentWebhookController extends Controller
 {
@@ -26,48 +28,66 @@ class PaymentWebhookController extends Controller
         $key = $validated['idempotency_key'];
 
         try {
-            DB::transaction(function () use ($orderId, $status, $key) {
-                // 2. Lock the Order
+            DB::transaction(function () use ($orderId, $status, $key, $request) {
+                
+                // 2. Check if this specific webhook key was already processed
+                if (WebhookLog::where('idempotency_key', $key)->exists()) {
+                    return; // Already handled, do nothing, return 200
+                }
+
+                // 3. Lock the Order FIRST
+                // We must find the order before creating the log, otherwise the 
+                // Foreign Key constraint on webhook_logs will fail and throw a 500/400 error.
                 $order = Order::where('id', $orderId)->lockForUpdate()->first();
 
                 if (!$order) {
+                    // If order doesn't exist yet, we throw 404 so provider retries later.
                     throw new \Exception('Order not found.', 404);
                 }
 
-                // 3. Idempotency Check
-                // If we already processed this exact key, don't do it again.
-                if ($order->payment_idempotency_key === $key) {
-                    return; // Return early, do nothing, return 200 OK outside transaction
-                }
+                // 4. Log the incoming webhook (Now safe because we know Order exists)
+                WebhookLog::create([
+                    'order_id' => $orderId,
+                    'idempotency_key' => $key,
+                    'status' => $status,
+                    'payload' => $request->all(),
+                ]);
 
-                // If the order is already in a final state (paid/cancelled) but the key is different,
-                // that's weird (maybe a duplicate payment attempt?), but we shouldn't change the state.
+                // 5. Check Order State (Out-of-Order Protection)
                 if ($order->status !== 'pending') {
+                    Log::info("Order {$orderId} is already {$order->status}. Ignoring webhook {$key}.");
                     return;
                 }
 
-                // 4. Update the Key so we know we processed this
-                $order->payment_idempotency_key = $key;
-
-                // 5. Handle Status
+                // 6. Handle Status Change
                 if ($status === 'success') {
                     $order->status = 'paid';
                     $order->save();
+                    Log::info("Order {$orderId} marked as paid via webhook {$key}.");
                 } else {
                     // Payment Failed: Cancel order AND return stock
                     $order->status = 'cancelled';
                     $order->save();
 
-                    // Increment product stock
+                    // Return stock
                     $order->product->increment('stock', $order->qty);
+                    Log::info("Order {$orderId} cancelled via webhook {$key}. Stock returned.");
                 }
             });
 
             return response()->json(['message' => 'Webhook processed']);
 
         } catch (\Exception $e) {
-            $status = $e->getCode() ?: 500;
-            if ($status < 100 || $status > 599) $status = 400;
+            // Keep 404 for "Order not found", otherwise default to 400 for bad requests
+            $status = $e->getCode();
+            
+            // Validate that the status code is a valid HTTP error code
+            if (!is_int($status) || $status < 100 || $status > 599) {
+                $status = 400;
+            }
+            
+            Log::error("Webhook Error: " . $e->getMessage());
+            
             return response()->json(['error' => $e->getMessage()], $status);
         }
     }

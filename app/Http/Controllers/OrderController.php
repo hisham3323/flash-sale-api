@@ -10,9 +10,6 @@ use Illuminate\Support\Facades\DB;
 
 class OrderController extends Controller
 {
-    /**
-     * Convert a Hold into an Order.
-     */
     public function store(Request $request): JsonResponse
     {
         $validated = $request->validate([
@@ -32,15 +29,16 @@ class OrderController extends Controller
 
                 // 2. Check if expired
                 if ($hold->expires_at < now()) {
-                    // Ideally, the background job cleans this up, but if we catch it here:
-                    // We must release the stock immediately and fail the order.
-                    $hold->product->increment('stock', $hold->qty);
+                    // Just delete the hold, no stock to return (since we didn't take it yet)
                     $hold->delete();
                     throw new \Exception('Hold has expired.', 400);
                 }
 
-                // 3. Create the Order
-                // Calculate total amount (Price * Qty)
+                // 3. DEDUCT STOCK PERMANENTLY
+                // Since Hold logic changed to "reservation", the Order now claims the physical stock.
+                $hold->product->decrement('stock', $hold->qty);
+
+                // 4. Create the Order
                 $totalAmount = $hold->product->price * $hold->qty;
 
                 $order = Order::create([
@@ -50,9 +48,7 @@ class OrderController extends Controller
                     'status' => 'pending',
                 ]);
 
-                // 4. Delete the Hold
-                // The stock is already deducted (during Hold creation), so we don't change stock here.
-                // The Order now represents the claim on that stock.
+                // 5. Delete the Hold (Reservation is converted to Order)
                 $hold->delete();
 
                 return $order;
